@@ -1,14 +1,10 @@
 #### What this does ####
 #    On success, logs events to Promptlayer
 import dotenv, os
-import requests
 
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.caching import DualCache
-
-from typing import Literal, Union
-
-dotenv.load_dotenv()  # Loading env variables using dotenv
+from typing import Literal, Union, Optional
 import traceback
 
 
@@ -46,6 +42,17 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
         pass
 
+    #### PRE-CALL CHECKS - router/proxy only ####
+    """
+    Allows usage-based-routing-v2 to run pre-call rpm checks within the picked deployment's semaphore (concurrency-safe tpm/rpm checks).
+    """
+
+    async def async_pre_call_check(self, deployment: dict) -> Optional[dict]:
+        pass
+
+    def pre_call_check(self, deployment: dict) -> Optional[dict]:
+        pass
+
     #### CALL HOOKS - proxy only ####
     """
     Control the modify incoming / outgoung data before calling the model
@@ -56,8 +63,17 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
         user_api_key_dict: UserAPIKeyAuth,
         cache: DualCache,
         data: dict,
-        call_type: Literal["completion", "embeddings", "image_generation"],
-    ):
+        call_type: Literal[
+            "completion",
+            "text_completion",
+            "embeddings",
+            "image_generation",
+            "moderation",
+            "audio_transcription",
+        ],
+    ) -> Optional[
+        Union[Exception, str, dict]
+    ]:  # raise exception if invalid, return a str for the user to receive - if rejected, or return a modified dictionary for passing into litellm
         pass
 
     async def async_post_call_failure_hook(
@@ -72,7 +88,12 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
     ):
         pass
 
-    async def async_moderation_hook(self, data: dict):
+    async def async_moderation_hook(
+        self,
+        data: dict,
+        user_api_key_dict: UserAPIKeyAuth,
+        call_type: Literal["completion", "embeddings", "image_generation"],
+    ):
         pass
 
     async def async_post_call_streaming_hook(
@@ -94,7 +115,6 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
             )
             print_verbose(f"Custom Logger - model call details: {kwargs}")
         except:
-            traceback.print_exc()
             print_verbose(f"Custom Logger Error - {traceback.format_exc()}")
 
     async def async_log_input_event(
@@ -109,7 +129,6 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
             )
             print_verbose(f"Custom Logger - model call details: {kwargs}")
         except:
-            traceback.print_exc()
             print_verbose(f"Custom Logger Error - {traceback.format_exc()}")
 
     def log_event(
@@ -125,7 +144,6 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
                 end_time,
             )
         except:
-            # traceback.print_exc()
             print_verbose(f"Custom Logger Error - {traceback.format_exc()}")
             pass
 
@@ -142,6 +160,5 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
                 end_time,
             )
         except:
-            # traceback.print_exc()
             print_verbose(f"Custom Logger Error - {traceback.format_exc()}")
             pass

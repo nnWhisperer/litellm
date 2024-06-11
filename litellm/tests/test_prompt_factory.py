@@ -2,16 +2,35 @@
 #    This tests if prompts are being correctly formatted
 import sys
 import os
+import pytest
 
 sys.path.insert(0, os.path.abspath("../.."))
 
 # from litellm.llms.prompt_templates.factory import prompt_factory
+import litellm
 from litellm import completion
 from litellm.llms.prompt_templates.factory import (
     anthropic_pt,
+    anthropic_messages_pt,
     claude_2_1_pt,
     llama_2_chat_pt,
+    prompt_factory,
+    _bedrock_tools_pt,
 )
+
+
+def test_llama_3_prompt():
+    messages = [
+        {"role": "system", "content": "You are a good bot"},
+        {"role": "user", "content": "Hey, how's it going?"},
+    ]
+    received_prompt = prompt_factory(
+        model="meta-llama/Meta-Llama-3-8B-Instruct", messages=messages
+    )
+    print(f"received_prompt: {received_prompt}")
+
+    expected_prompt = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a good bot<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHey, how's it going?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"""
+    assert received_prompt == expected_prompt
 
 
 def test_codellama_prompt_format():
@@ -94,4 +113,43 @@ def test_anthropic_pt_formatting():
     assert anthropic_pt(messages) == expected_prompt
 
 
+def test_anthropic_messages_pt():
+    # Test case: No messages (filtered system messages only)
+    litellm.modify_params = True
+    messages = []
+    expected_messages = [{"role": "user", "content": [{"type": "text", "text": "."}]}]
+    assert anthropic_messages_pt(messages) == expected_messages
+
+    # Test case: No messages (filtered system messages only) when modify_params is False should raise error
+    litellm.modify_params = False
+    messages = []
+    with pytest.raises(Exception) as err:
+        anthropic_messages_pt(messages)
+    assert "Invalid first message." in str(err.value)
+
+
 # codellama_prompt_format()
+def test_bedrock_tool_calling_pt():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        },
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+    converted_tools = _bedrock_tools_pt(tools=tools)
+
+    print(converted_tools)

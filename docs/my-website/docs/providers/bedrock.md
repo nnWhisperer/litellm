@@ -146,6 +146,15 @@ print(response)
 
 ## Usage - Function Calling 
 
+:::info 
+
+Claude returns it's output as an XML Tree. [Here is how we translate it](https://github.com/BerriAI/litellm/blob/49642a5b00a53b1babc1a753426a8afcac85dbbe/litellm/llms/prompt_templates/factory.py#L734).
+
+You can see the raw response via `response._hidden_params["original_response"]`.
+
+Claude hallucinates, e.g. returning the list param `value` as `<value>\n<item>apple</item>\n<item>banana</item>\n</value>` or `<value>\n<list>\n<item>apple</item>\n<item>banana</item>\n</list>\n</value>`.
+:::
+
 ```python
 from litellm import completion
 
@@ -352,47 +361,6 @@ response = completion(
 )
 ```
 
-### Passing an external BedrockRuntime.Client as a parameter - Completion()
-Pass an external BedrockRuntime.Client object as a parameter to litellm.completion. Useful when using an AWS credentials profile, SSO session, assumed role session, or if environment variables are not available for auth.
-
-Create a client from session credentials:
-```python
-import boto3
-from litellm import completion
-
-bedrock = boto3.client(
-            service_name="bedrock-runtime",
-            region_name="us-east-1",
-            aws_access_key_id="",
-            aws_secret_access_key="",
-            aws_session_token="",
-)
-
-response = completion(
-            model="bedrock/anthropic.claude-instant-v1",
-            messages=[{ "content": "Hello, how are you?","role": "user"}],
-            aws_bedrock_client=bedrock,
-)
-```
-
-Create a client from AWS profile in `~/.aws/config`:
-```python
-import boto3
-from litellm import completion
-
-dev_session = boto3.Session(profile_name="dev-profile")
-bedrock = dev_session.client(
-            service_name="bedrock-runtime",
-            region_name="us-east-1",
-)
-
-response = completion(
-            model="bedrock/anthropic.claude-instant-v1",
-            messages=[{ "content": "Hello, how are you?","role": "user"}],
-            aws_bedrock_client=bedrock,
-)
-```
-
 ### SSO Login (AWS Profile)
 - Set `AWS_PROFILE` environment variable
 - Make bedrock completion call
@@ -455,6 +423,56 @@ response = completion(
         )
 ```
 
+
+### Passing an external BedrockRuntime.Client as a parameter - Completion()
+
+:::warning
+
+This is a deprecated flow. Boto3 is not async. And boto3.client does not let us make the http call through httpx. Pass in your aws params through the method above 👆. [See Auth Code](https://github.com/BerriAI/litellm/blob/55a20c7cce99a93d36a82bf3ae90ba3baf9a7f89/litellm/llms/bedrock_httpx.py#L284) [Add new auth flow](https://github.com/BerriAI/litellm/issues)
+
+:::
+
+Pass an external BedrockRuntime.Client object as a parameter to litellm.completion. Useful when using an AWS credentials profile, SSO session, assumed role session, or if environment variables are not available for auth.
+
+Create a client from session credentials:
+```python
+import boto3
+from litellm import completion
+
+bedrock = boto3.client(
+            service_name="bedrock-runtime",
+            region_name="us-east-1",
+            aws_access_key_id="",
+            aws_secret_access_key="",
+            aws_session_token="",
+)
+
+response = completion(
+            model="bedrock/anthropic.claude-instant-v1",
+            messages=[{ "content": "Hello, how are you?","role": "user"}],
+            aws_bedrock_client=bedrock,
+)
+```
+
+Create a client from AWS profile in `~/.aws/config`:
+```python
+import boto3
+from litellm import completion
+
+dev_session = boto3.Session(profile_name="dev-profile")
+bedrock = dev_session.client(
+            service_name="bedrock-runtime",
+            region_name="us-east-1",
+)
+
+response = completion(
+            model="bedrock/anthropic.claude-instant-v1",
+            messages=[{ "content": "Hello, how are you?","role": "user"}],
+            aws_bedrock_client=bedrock,
+)
+```
+
+
 ## Provisioned throughput models
 To use provisioned throughput Bedrock models pass 
 - `model=bedrock/<base-model>`, example `model=bedrock/anthropic.claude-v2`. Set `model` to any of the [Supported AWS models](#supported-aws-bedrock-models)
@@ -486,11 +504,14 @@ Here's an example of using a bedrock model with LiteLLM
 
 | Model Name                 | Command                                                          |
 |----------------------------|------------------------------------------------------------------|
-| Anthropic Claude-V3  sonnet    | `completion(model='bedrock/anthropic.claude-3-sonnet-20240229-v1:0', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-V3 Haiku     | `completion(model='bedrock/anthropic.claude-3-haiku-20240307-v1:0', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-V2.1      | `completion(model='bedrock/anthropic.claude-v2:1', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-V2        | `completion(model='bedrock/anthropic.claude-v2', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-Instant V1 | `completion(model='bedrock/anthropic.claude-instant-v1', messages=messages)` | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3  sonnet    | `completion(model='bedrock/anthropic.claude-3-sonnet-20240229-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3 Haiku     | `completion(model='bedrock/anthropic.claude-3-haiku-20240307-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3 Opus     | `completion(model='bedrock/anthropic.claude-3-opus-20240229-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V2.1      | `completion(model='bedrock/anthropic.claude-v2:1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V2        | `completion(model='bedrock/anthropic.claude-v2', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-Instant V1 | `completion(model='bedrock/anthropic.claude-instant-v1', messages=messages)` | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Meta llama3-70b        | `completion(model='bedrock/meta.llama3-70b-instruct-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Meta llama3-8b | `completion(model='bedrock/meta.llama3-8b-instruct-v1:0', messages=messages)` | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
 | Amazon Titan Lite          | `completion(model='bedrock/amazon.titan-text-lite-v1', messages=messages)` | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Amazon Titan Express       | `completion(model='bedrock/amazon.titan-text-express-v1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Cohere Command             | `completion(model='bedrock/cohere.command-text-v14', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
@@ -526,7 +547,8 @@ print(response)
 
 | Model Name           | Function Call                               |
 |----------------------|---------------------------------------------|
-| Titan Embeddings - G1 | `embedding(model="bedrock/amazon.titan-embed-text-v1", input=input)` |
+| Titan Embeddings V2 | `embedding(model="bedrock/amazon.titan-embed-text-v2:0", input=input)` |
+| Titan Embeddings - V1 | `embedding(model="bedrock/amazon.titan-embed-text-v1", input=input)` |
 | Cohere Embeddings - English | `embedding(model="bedrock/cohere.embed-english-v3", input=input)` |
 | Cohere Embeddings - Multilingual | `embedding(model="bedrock/cohere.embed-multilingual-v3", input=input)` |
 

@@ -79,7 +79,7 @@ class _PROXY_BatchRedisRequests(CustomLogger):
                     self.print_verbose(f"redis keys: {keys}")
                     if len(keys) > 0:
                         key_value_dict = (
-                            await litellm.cache.cache.async_get_cache_pipeline(
+                            await litellm.cache.cache.async_batch_get_cache(
                                 key_list=keys
                             )
                         )
@@ -94,7 +94,12 @@ class _PROXY_BatchRedisRequests(CustomLogger):
         except HTTPException as e:
             raise e
         except Exception as e:
-            traceback.print_exc()
+            verbose_proxy_logger.error(
+                "litellm.proxy.hooks.batch_redis_get.py::async_pre_call_hook(): Exception occured - {}".format(
+                    str(e)
+                )
+            )
+            verbose_proxy_logger.debug(traceback.format_exc())
 
     async def async_get_cache(self, *args, **kwargs):
         """

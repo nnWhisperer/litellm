@@ -11,23 +11,21 @@ sys.path.append(os.getcwd())
 
 config_filename = "litellm.secrets"
 
-load_dotenv()
+litellm_mode = os.getenv("LITELLM_MODE", "DEV")  # "PRODUCTION", "DEV"
+if litellm_mode == "DEV":
+    load_dotenv()
 from importlib import resources
 import shutil
 
+
 telemetry = None
-default_num_workers = 1
-try:
-    default_num_workers = os.cpu_count() or 1
-    if default_num_workers is not None and default_num_workers > 0:
-        default_num_workers -= 1
-except:
-    pass
 
 
 def append_query_params(url, params):
-    print(f"url: {url}")
-    print(f"params: {params}")
+    from litellm._logging import verbose_proxy_logger
+
+    verbose_proxy_logger.debug(f"url: {url}")
+    verbose_proxy_logger.debug(f"params: {params}")
     parsed_url = urlparse.urlparse(url)
     parsed_query = urlparse.parse_qs(parsed_url.query)
     parsed_query.update(params)
@@ -64,7 +62,7 @@ def is_port_in_use(port):
 @click.option("--port", default=4000, help="Port to bind the server to.", envvar="PORT")
 @click.option(
     "--num_workers",
-    default=default_num_workers,
+    default=1,
     help="Number of gunicorn workers to spin up",
     envvar="NUM_WORKERS",
 )
@@ -229,16 +227,14 @@ def run_server(
     ssl_keyfile_path,
     ssl_certfile_path,
 ):
-    global feature_telemetry
     args = locals()
     if local:
-        from proxy_server import app, save_worker_config, usage_telemetry, ProxyConfig
+        from proxy_server import app, save_worker_config, ProxyConfig
     else:
         try:
             from .proxy_server import (
                 app,
                 save_worker_config,
-                usage_telemetry,
                 ProxyConfig,
             )
         except ImportError as e:
@@ -250,10 +246,8 @@ def run_server(
                 from proxy_server import (
                     app,
                     save_worker_config,
-                    usage_telemetry,
                     ProxyConfig,
                 )
-    feature_telemetry = usage_telemetry
     if version == True:
         pkg_version = importlib.metadata.version("litellm")
         click.echo(f"\nLiteLLM: Current Version = {pkg_version}\n")
@@ -261,7 +255,7 @@ def run_server(
     if model and "ollama" in model and api_base is None:
         run_ollama_serve()
     if test_async is True:
-        import requests, concurrent, time
+        import requests, concurrent, time  # type: ignore
 
         api_base = f"http://{host}:{port}"
 
@@ -427,16 +421,30 @@ def run_server(
             read from there and save it to os.env['DATABASE_URL']
             """
             try:
-                import yaml, asyncio
+                import yaml, asyncio  # type: ignore
             except:
                 raise ImportError(
                     "yaml needs to be imported. Run - `pip install 'litellm[proxy]'`"
                 )
 
             proxy_config = ProxyConfig()
-            _, _, general_settings = asyncio.run(
-                proxy_config.load_config(router=None, config_file_path=config)
-            )
+            _config = asyncio.run(proxy_config.get_config(config_file_path=config))
+            ### LITELLM SETTINGS ###
+            litellm_settings = _config.get("litellm_settings", None)
+            if (
+                litellm_settings is not None
+                and "json_logs" in litellm_settings
+                and litellm_settings["json_logs"] == True
+            ):
+                import litellm
+
+                litellm.json_logs = True
+
+                litellm._turn_on_json()
+            ### GENERAL SETTINGS ###
+            general_settings = _config.get("general_settings", {})
+            if general_settings is None:
+                general_settings = {}
             database_url = general_settings.get("database_url", None)
             db_connection_pool_limit = general_settings.get(
                 "database_connection_pool_limit", 100
@@ -511,6 +519,7 @@ def run_server(
             port = random.randint(1024, 49152)
 
         from litellm.proxy.proxy_server import app
+        import litellm
 
         if run_gunicorn == False:
             if ssl_certfile_path is not None and ssl_keyfile_path is not None:
@@ -525,7 +534,14 @@ def run_server(
                     ssl_certfile=ssl_certfile_path,
                 )  # run uvicorn
             else:
-                uvicorn.run(app, host=host, port=port)  # run uvicorn
+                if litellm.json_logs:
+                    from litellm.proxy._logging import logger
+
+                    uvicorn.run(
+                        app, host=host, port=port, log_config=None
+                    )  # run uvicorn w/ json
+                else:
+                    uvicorn.run(app, host=host, port=port)  # run uvicorn
         elif run_gunicorn == True:
             import gunicorn.app.base
 

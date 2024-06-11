@@ -3,12 +3,9 @@ openai
 python-dotenv
 tiktoken
 importlib_metadata
-baseten
 cohere
 redis
 anthropic
-boto3
 orjson
-pydantic
-google-cloud-aiplatform
-redisvl==0.0.7 # semantic caching
+pydantic==2.7.1
+google-cloud-aiplatform==1.43.0

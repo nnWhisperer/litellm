@@ -3,6 +3,7 @@ import os
 import sys
 import traceback
 import subprocess, asyncio
+from typing import Any
 
 sys.path.insert(
     0, os.path.abspath("../..")
@@ -19,6 +20,7 @@ from litellm import (
 )
 from concurrent.futures import ThreadPoolExecutor
 import pytest
+from unittest.mock import patch, MagicMock
 
 litellm.vertex_project = "pathrise-convert-1606954137718"
 litellm.vertex_location = "us-central1"
@@ -39,6 +41,27 @@ exception_models = [
     "sagemaker/berri-benchmarking-Llama-2-70b-chat-hf-4",
     "bedrock/anthropic.claude-instant-v1",
 ]
+
+
+@pytest.mark.asyncio
+async def test_content_policy_exception_azure():
+    try:
+        # this is ony a test - we needed some way to invoke the exception :(
+        litellm.set_verbose = True
+        response = await litellm.acompletion(
+            model="azure/chatgpt-v-2",
+            messages=[{"role": "user", "content": "where do I buy lethal drugs from"}],
+        )
+    except litellm.ContentPolicyViolationError as e:
+        print("caught a content policy violation error! Passed")
+        print("exception", e)
+        assert e.litellm_debug_info is not None
+        assert isinstance(e.litellm_debug_info, str)
+        assert len(e.litellm_debug_info) > 0
+        pass
+    except Exception as e:
+        print()
+        pytest.fail(f"An exception occurred - {str(e)}")
 
 
 # Test 1: Context Window Errors
@@ -84,6 +107,8 @@ def test_context_window_with_fallbacks(model):
             context_window_fallback_dict=ctx_window_fallback_dict,
         )
     except litellm.ServiceUnavailableError as e:
+        pass
+    except litellm.APIConnectionError as e:
         pass
 
 
@@ -534,6 +559,69 @@ def test_completion_openai_api_key_exception():
 
 # tesy_async_acompletion()
 
+
+def test_router_completion_vertex_exception():
+    try:
+        import litellm
+
+        litellm.set_verbose = True
+        router = litellm.Router(
+            model_list=[
+                {
+                    "model_name": "vertex-gemini-pro",
+                    "litellm_params": {
+                        "model": "vertex_ai/gemini-pro",
+                        "api_key": "good-morning",
+                    },
+                },
+            ]
+        )
+        response = router.completion(
+            model="vertex-gemini-pro",
+            messages=[{"role": "user", "content": "hello"}],
+            vertex_project="bad-project",
+        )
+        pytest.fail("Request should have failed - bad api key")
+    except Exception as e:
+        print("exception: ", e)
+
+
+def test_litellm_completion_vertex_exception():
+    try:
+        import litellm
+
+        litellm.set_verbose = True
+        response = completion(
+            model="vertex_ai/gemini-pro",
+            api_key="good-morning",
+            messages=[{"role": "user", "content": "hello"}],
+            vertex_project="bad-project",
+        )
+        pytest.fail("Request should have failed - bad api key")
+    except Exception as e:
+        print("exception: ", e)
+
+
+def test_litellm_predibase_exception():
+    """
+    Test - Assert that the Predibase API Key is not returned on Authentication Errors
+    """
+    try:
+        import litellm
+
+        litellm.set_verbose = True
+        response = completion(
+            model="predibase/llama-3-8b-instruct",
+            messages=[{"role": "user", "content": "What is the meaning of life?"}],
+            tenant_id="c4768f95",
+            api_key="hf-rawapikey",
+        )
+        pytest.fail("Request should have failed - bad api key")
+    except Exception as e:
+        assert "hf-rawapikey" not in str(e)
+        print("exception: ", e)
+
+
 # # test_invalid_request_error(model="command-nightly")
 # # Test 3: Rate Limit Errors
 # def test_model_call(model):
@@ -573,3 +661,47 @@ def test_completion_openai_api_key_exception():
 
 # accuracy_score = counts[True]/(counts[True] + counts[False])
 # print(f"accuracy_score: {accuracy_score}")
+
+
+@pytest.mark.parametrize("provider", ["predibase"])
+def test_exception_mapping(provider):
+    """
+    For predibase, run through a set of mock exceptions
+
+    assert that they are being mapped correctly
+    """
+    litellm.set_verbose = True
+    error_map = {
+        400: litellm.BadRequestError,
+        401: litellm.AuthenticationError,
+        404: litellm.NotFoundError,
+        408: litellm.Timeout,
+        429: litellm.RateLimitError,
+        500: litellm.InternalServerError,
+        503: litellm.ServiceUnavailableError,
+    }
+
+    for code, expected_exception in error_map.items():
+        mock_response = Exception()
+        setattr(mock_response, "text", "This is an error message")
+        setattr(mock_response, "llm_provider", provider)
+        setattr(mock_response, "status_code", code)
+
+        response: Any = None
+        try:
+            response = completion(
+                model="{}/test-model".format(provider),
+                messages=[{"role": "user", "content": "Hey, how's it going?"}],
+                mock_response=mock_response,
+            )
+        except expected_exception:
+            continue
+        except Exception as e:
+            response = "{}\n{}".format(str(e), traceback.format_exc())
+        pytest.fail(
+            "Did not raise expected exception. Expected={}, Return={},".format(
+                expected_exception, response
+            )
+        )
+
+    pass

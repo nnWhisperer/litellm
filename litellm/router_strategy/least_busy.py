@@ -6,10 +6,8 @@
 #   - use litellm.success + failure callbacks to log when a request completed
 #   - in get_available_deployment, for a given model group name -> pick based on traffic
 
-import dotenv, os, requests, random
+import dotenv, os, requests, random  # type: ignore
 from typing import Optional
-
-dotenv.load_dotenv()  # Loading env variables using dotenv
 import traceback
 from litellm.caching import DualCache
 from litellm.integrations.custom_logger import CustomLogger
@@ -41,6 +39,8 @@ class LeastBusyLoggingHandler(CustomLogger):
                 id = kwargs["litellm_params"].get("model_info", {}).get("id", None)
                 if model_group is None or id is None:
                     return
+                elif isinstance(id, int):
+                    id = str(id)
 
                 request_count_api_key = f"{model_group}_request_count"
                 # update cache
@@ -67,6 +67,8 @@ class LeastBusyLoggingHandler(CustomLogger):
                 id = kwargs["litellm_params"].get("model_info", {}).get("id", None)
                 if model_group is None or id is None:
                     return
+                elif isinstance(id, int):
+                    id = str(id)
 
                 request_count_api_key = f"{model_group}_request_count"
                 # decrement count in cache
@@ -95,6 +97,8 @@ class LeastBusyLoggingHandler(CustomLogger):
                 id = kwargs["litellm_params"].get("model_info", {}).get("id", None)
                 if model_group is None or id is None:
                     return
+                elif isinstance(id, int):
+                    id = str(id)
 
                 request_count_api_key = f"{model_group}_request_count"
                 # decrement count in cache
@@ -124,6 +128,8 @@ class LeastBusyLoggingHandler(CustomLogger):
                 id = kwargs["litellm_params"].get("model_info", {}).get("id", None)
                 if model_group is None or id is None:
                     return
+                elif isinstance(id, int):
+                    id = str(id)
 
                 request_count_api_key = f"{model_group}_request_count"
                 # decrement count in cache
@@ -152,6 +158,8 @@ class LeastBusyLoggingHandler(CustomLogger):
                 id = kwargs["litellm_params"].get("model_info", {}).get("id", None)
                 if model_group is None or id is None:
                     return
+                elif isinstance(id, int):
+                    id = str(id)
 
                 request_count_api_key = f"{model_group}_request_count"
                 # decrement count in cache

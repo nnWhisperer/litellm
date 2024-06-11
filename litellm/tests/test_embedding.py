@@ -193,6 +193,33 @@ def test_openai_azure_embedding():
         pytest.fail(f"Error occurred: {e}")
 
 
+def test_openai_azure_embedding_optional_arg(mocker):
+    mocked_create_embeddings = mocker.patch.object(
+        openai.resources.embeddings.Embeddings,
+        "create",
+        return_value=openai.types.create_embedding_response.CreateEmbeddingResponse(
+            data=[],
+            model="azure/test",
+            object="list",
+            usage=openai.types.create_embedding_response.Usage(
+                prompt_tokens=1, total_tokens=2
+            ),
+        ),
+    )
+    _ = litellm.embedding(
+        model="azure/test",
+        input=["test"],
+        api_version="test",
+        api_base="test",
+        azure_ad_token="test",
+    )
+
+    assert mocked_create_embeddings.called_once_with(
+        model="test", input=["test"], timeout=600
+    )
+    assert "azure_ad_token" not in mocked_create_embeddings.call_args.kwargs
+
+
 # test_openai_azure_embedding()
 
 # test_openai_embedding()
@@ -457,9 +484,28 @@ def test_mistral_embeddings():
         pytest.fail(f"Error occurred: {e}")
 
 
+@pytest.mark.skip(reason="local test")
+def test_watsonx_embeddings():
+    try:
+        litellm.set_verbose = True
+        response = litellm.embedding(
+            model="watsonx/ibm/slate-30m-english-rtrvr",
+            input=["good morning from litellm"],
+        )
+        print(f"response: {response}")
+        assert isinstance(response.usage, litellm.Usage)
+    except litellm.RateLimitError as e:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
 # test_mistral_embeddings()
 
 
+@pytest.mark.skip(
+    reason="Community maintained embedding provider - they are quite unstable"
+)
 def test_voyage_embeddings():
     try:
         litellm.set_verbose = True
@@ -468,6 +514,54 @@ def test_voyage_embeddings():
             input=["good morning from litellm"],
         )
         print(f"response: {response}")
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
+@pytest.mark.asyncio
+async def test_triton_embeddings():
+    try:
+        litellm.set_verbose = True
+        response = await litellm.aembedding(
+            model="triton/my-triton-model",
+            api_base="https://exampleopenaiendpoint-production.up.railway.app/triton/embeddings",
+            input=["good morning from litellm"],
+        )
+        print(f"response: {response}")
+
+        # stubbed endpoint is setup to return this
+        assert response.data[0]["embedding"] == [0.1, 0.2, 0.3]
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
+@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.asyncio
+async def test_databricks_embeddings(sync_mode):
+    try:
+        litellm.set_verbose = True
+        litellm.drop_params = True
+
+        if sync_mode:
+            response = litellm.embedding(
+                model="databricks/databricks-bge-large-en",
+                input=["good morning from litellm"],
+                instruction="Represent this sentence for searching relevant passages:",
+            )
+        else:
+            response = await litellm.aembedding(
+                model="databricks/databricks-bge-large-en",
+                input=["good morning from litellm"],
+                instruction="Represent this sentence for searching relevant passages:",
+            )
+
+        print(f"response: {response}")
+
+        openai.types.CreateEmbeddingResponse.model_validate(
+            response.model_dump(), strict=True
+        )
+        # stubbed endpoint is setup to return this
+        # assert response.data[0]["embedding"] == [0.1, 0.2, 0.3]
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 

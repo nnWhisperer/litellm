@@ -1,17 +1,35 @@
 model_list:
-  - model_name: azure-gpt-3.5
-    litellm_params:
-      model: azure/chatgpt-v-2
-      api_base: os.environ/AZURE_API_BASE
-      api_key: os.environ/AZURE_API_KEY
-      api_version: "2023-07-01-preview"
   - model_name: fake-openai-endpoint
     litellm_params:
       model: openai/fake
       api_key: fake-key
       api_base: https://exampleopenaiendpoint-production.up.railway.app/
+  - model_name: llama3
+    litellm_params:
+      model: groq/llama3-8b-8192
+  - model_name: gpt-3.5-turbo
+    litellm_params:
+      model: gpt-3.5-turbo
+  - model_name: "*"
+    litellm_params:
+      model: openai/*
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: my-triton-model
+    litellm_params:
+      model: triton/any"
+      api_base: https://exampleopenaiendpoint-production.up.railway.app/triton/embeddings
+
 general_settings:
   master_key: sk-1234
-router_settings:
-  set_verbose: True
-  debug_level: "DEBUG"
+
+litellm_settings:
+  callbacks: ["otel"]
+  store_audit_logs: true
+  redact_messages_in_exceptions: True
+  enforced_params:  
+    - user
+    - metadata
+    - metadata.generation_name
+  cache: True
+
+

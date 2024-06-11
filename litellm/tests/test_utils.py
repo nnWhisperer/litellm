@@ -20,6 +20,9 @@ from litellm.utils import (
     validate_environment,
     function_to_dict,
     token_counter,
+    create_pretrained_tokenizer,
+    create_tokenizer,
+    get_max_tokens,
 )
 
 # Assuming your trim_messages, shorten_message_to_fit_limit, and get_token_count functions are all in a module named 'message_utils'
@@ -173,6 +176,22 @@ def test_trimming_should_not_change_original_messages():
     assert messages == messages_copy
 
 
+@pytest.mark.parametrize("model", ["gpt-4-0125-preview", "claude-3-opus-20240229"])
+def test_trimming_with_model_cost_max_input_tokens(model):
+    messages = [
+        {"role": "system", "content": "This is a normal system message"},
+        {
+            "role": "user",
+            "content": "This is a sentence" * 100000,
+        },
+    ]
+    trimmed_messages = trim_messages(messages, model=model)
+    assert (
+        get_token_count(trimmed_messages, model=model)
+        < litellm.model_cost[model]["max_input_tokens"]
+    )
+
+
 def test_get_valid_models():
     old_environ = os.environ
     os.environ = {"OPENAI_API_KEY": "temp"}  # mock set only openai key in environ
@@ -219,16 +238,18 @@ def test_validate_environment_empty_model():
 @mock.patch.dict(os.environ, {"OLLAMA_API_BASE": "foo"}, clear=True)
 def test_validate_environment_ollama():
     for provider in ["ollama", "ollama_chat"]:
-        kv = validate_environment(provider+"/mistral")
+        kv = validate_environment(provider + "/mistral")
         assert kv["keys_in_environment"]
         assert kv["missing_keys"] == []
+
 
 @mock.patch.dict(os.environ, {}, clear=True)
 def test_validate_environment_ollama_failed():
     for provider in ["ollama", "ollama_chat"]:
-        kv = validate_environment(provider+"/mistral")
+        kv = validate_environment(provider + "/mistral")
         assert not kv["keys_in_environment"]
         assert kv["missing_keys"] == ["OLLAMA_API_BASE"]
+
 
 def test_function_to_dict():
     print("testing function to dict for get current weather")
@@ -338,6 +359,7 @@ def test_supports_function_calling():
         assert (
             litellm.supports_function_calling(model="azure/gpt-4-1106-preview") == True
         )
+        assert litellm.supports_function_calling(model="groq/gemma-7b-it") == True
         assert (
             litellm.supports_function_calling(model="anthropic.claude-instant-v1")
             == False
@@ -351,3 +373,16 @@ def test_supports_function_calling():
         assert litellm.supports_function_calling(model="claude-2") == False
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
+
+
+def test_get_max_token_unit_test():
+    """
+    More complete testing in `test_completion_cost.py`
+    """
+    model = "bedrock/anthropic.claude-3-haiku-20240307-v1:0"
+
+    max_tokens = get_max_tokens(
+        model
+    )  # Returns a number instead of throwing an Exception
+
+    assert isinstance(max_tokens, int)

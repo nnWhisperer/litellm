@@ -10,6 +10,7 @@ from typing import Optional, Literal, List, Union
 from litellm import completion, embedding, Cache
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
+from litellm.types.utils import LiteLLMCommonStrings
 
 # Test Scenarios (test across completion, streaming, embedding)
 ## 1: Pre-API-Call
@@ -38,19 +39,17 @@ class CompletionCustomHandler(
     # Class variables or attributes
     def __init__(self):
         self.errors = []
-        self.states: Optional[
-            List[
-                Literal[
-                    "sync_pre_api_call",
-                    "async_pre_api_call",
-                    "post_api_call",
-                    "sync_stream",
-                    "async_stream",
-                    "sync_success",
-                    "async_success",
-                    "sync_failure",
-                    "async_failure",
-                ]
+        self.states: List[
+            Literal[
+                "sync_pre_api_call",
+                "async_pre_api_call",
+                "post_api_call",
+                "sync_stream",
+                "async_stream",
+                "sync_success",
+                "async_success",
+                "sync_failure",
+                "async_failure",
             ]
         ] = []
 
@@ -69,13 +68,25 @@ class CompletionCustomHandler(
             assert isinstance(kwargs["start_time"], (datetime, type(None)))
             assert isinstance(kwargs["stream"], bool)
             assert isinstance(kwargs["user"], (str, type(None)))
-        except Exception as e:
+            ### METADATA
+            metadata_value = kwargs["litellm_params"].get("metadata")
+            assert metadata_value is None or isinstance(metadata_value, dict)
+            if metadata_value is not None:
+                if litellm.turn_off_message_logging is True:
+                    assert (
+                        metadata_value["raw_request"]
+                        is LiteLLMCommonStrings.redacted_by_litellm.value
+                    )
+                else:
+                    assert "raw_request" not in metadata_value or isinstance(
+                        metadata_value["raw_request"], str
+                    )
+        except Exception:
             print(f"Assertion Error: {traceback.format_exc()}")
             self.errors.append(traceback.format_exc())
 
     def log_post_api_call(self, kwargs, response_obj, start_time, end_time):
         try:
-            print(f"kwargs: {kwargs}")
             self.states.append("post_api_call")
             ## START TIME
             assert isinstance(start_time, datetime)
@@ -167,6 +178,8 @@ class CompletionCustomHandler(
             )
             assert isinstance(kwargs["optional_params"], dict)
             assert isinstance(kwargs["litellm_params"], dict)
+            assert isinstance(kwargs["litellm_params"]["api_base"], str)
+            assert kwargs["cache_hit"] is None or isinstance(kwargs["cache_hit"], bool)
             assert isinstance(kwargs["start_time"], (datetime, type(None)))
             assert isinstance(kwargs["stream"], bool)
             assert isinstance(kwargs["user"], (str, type(None)))
@@ -178,6 +191,8 @@ class CompletionCustomHandler(
             assert isinstance(
                 kwargs["original_response"],
                 (str, litellm.CustomStreamWrapper, BaseModel),
+            ), "Original Response={}. Allowed types=[str, litellm.CustomStreamWrapper, BaseModel]".format(
+                kwargs["original_response"]
             )
             assert isinstance(kwargs["additional_args"], (dict, type(None)))
             assert isinstance(kwargs["log_event_type"], str)
@@ -253,15 +268,23 @@ class CompletionCustomHandler(
             assert isinstance(end_time, datetime)
             ## RESPONSE OBJECT
             assert isinstance(
-                response_obj, (litellm.ModelResponse, litellm.EmbeddingResponse)
+                response_obj,
+                (
+                    litellm.ModelResponse,
+                    litellm.EmbeddingResponse,
+                    litellm.TextCompletionResponse,
+                ),
             )
             ## KWARGS
             assert isinstance(kwargs["model"], str)
             assert isinstance(kwargs["messages"], list)
             assert isinstance(kwargs["optional_params"], dict)
             assert isinstance(kwargs["litellm_params"], dict)
+            assert isinstance(kwargs["litellm_params"]["api_base"], str)
             assert isinstance(kwargs["start_time"], (datetime, type(None)))
             assert isinstance(kwargs["stream"], bool)
+            assert isinstance(kwargs["completion_start_time"], datetime)
+            assert kwargs["cache_hit"] is None or isinstance(kwargs["cache_hit"], bool)
             assert isinstance(kwargs["user"], (str, type(None)))
             assert isinstance(kwargs["input"], (list, dict, str))
             assert isinstance(kwargs["api_key"], (str, type(None)))
@@ -521,6 +544,7 @@ def test_chat_bedrock_stream():
 @pytest.mark.asyncio
 async def test_async_chat_bedrock_stream():
     try:
+        litellm.set_verbose = True
         customHandler = CompletionCustomHandler()
         litellm.callbacks = [customHandler]
         response = await litellm.acompletion(
@@ -549,7 +573,7 @@ async def test_async_chat_bedrock_stream():
                 continue
         except:
             pass
-        time.sleep(1)
+        await asyncio.sleep(1)
         print(f"customHandler.errors: {customHandler.errors}")
         assert len(customHandler.errors) == 0
         litellm.callbacks = []
@@ -646,11 +670,13 @@ def load_vertex_ai_credentials():
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(temp_file.name)
 
 
+@pytest.mark.skip(reason="Vertex AI Hanging")
 @pytest.mark.asyncio
 async def test_async_chat_vertex_ai_stream():
     try:
         load_vertex_ai_credentials()
         customHandler = CompletionCustomHandler()
+        litellm.set_verbose = True
         litellm.callbacks = [customHandler]
         # test streaming
         response = await litellm.acompletion(
@@ -667,6 +693,7 @@ async def test_async_chat_vertex_ai_stream():
         async for chunk in response:
             print(f"chunk: {chunk}")
             continue
+        await asyncio.sleep(10)
         print(f"customHandler.states: {customHandler.states}")
         assert (
             customHandler.states.count("async_success") == 1
@@ -677,6 +704,44 @@ async def test_async_chat_vertex_ai_stream():
 
 
 # Text Completion
+
+
+@pytest.mark.asyncio
+async def test_async_text_completion_bedrock():
+    try:
+        customHandler = CompletionCustomHandler()
+        litellm.callbacks = [customHandler]
+        response = await litellm.atext_completion(
+            model="bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            prompt=["Hi 👋 - i'm async text completion bedrock"],
+        )
+        # test streaming
+        response = await litellm.atext_completion(
+            model="bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            prompt=["Hi 👋 - i'm async text completion bedrock"],
+            stream=True,
+        )
+        async for chunk in response:
+            print(f"chunk: {chunk}")
+            continue
+        ## test failure callback
+        try:
+            response = await litellm.atext_completion(
+                model="bedrock/",
+                prompt=["Hi 👋 - i'm async text completion bedrock"],
+                stream=True,
+                api_key="my-bad-key",
+            )
+            async for chunk in response:
+                continue
+        except:
+            pass
+        time.sleep(1)
+        print(f"customHandler.errors: {customHandler.errors}")
+        assert len(customHandler.errors) == 0
+        litellm.callbacks = []
+    except Exception as e:
+        pytest.fail(f"An exception occurred: {str(e)}")
 
 
 ## Test OpenAI text completion + Async
@@ -1004,3 +1069,25 @@ def test_image_generation_openai():
 ## Test Azure + Sync
 
 ## Test Azure + Async
+
+##### PII REDACTION ######
+
+
+def test_turn_off_message_logging():
+    """
+    If 'turn_off_message_logging' is true, assert no user request information is logged.
+    """
+    litellm.turn_off_message_logging = True
+
+    # sync completion
+    customHandler = CompletionCustomHandler()
+    litellm.callbacks = [customHandler]
+
+    _ = litellm.completion(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "Hey, how's it going?"}],
+        mock_response="Going well!",
+    )
+
+    time.sleep(2)
+    assert len(customHandler.errors) == 0
