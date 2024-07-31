@@ -12,10 +12,14 @@ import ViewKeyTable from "./view_key_table";
 import ViewUserSpend from "./view_user_spend";
 import ViewUserTeam from "./view_user_team";
 import DashboardTeam from "./dashboard_default_team";
+import Onboarding from "../app/onboarding/page";
 import { useSearchParams, useRouter } from "next/navigation";
 import { jwtDecode } from "jwt-decode";
 import { Typography } from "antd";
 const isLocal = process.env.NODE_ENV === "development";
+if (isLocal != true) {
+  console.log = function() {};
+}
 console.log("isLocal:", isLocal);
 const proxyBaseUrl = isLocal ? "http://localhost:4000" : null;
 
@@ -23,6 +27,14 @@ type UserSpendData = {
   spend: number;
   max_budget?: number | null;
 };
+
+function getCookie(name: string) {
+  console.log("COOKIES", document.cookie)
+  const cookieValue = document.cookie
+      .split('; ')
+      .find(row => row.startsWith(name + '='));
+  return cookieValue ? cookieValue.split('=')[1] : null;
+}
 
 interface UserDashboardProps {
   userID: string | null;
@@ -66,7 +78,10 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
   const viewSpend = searchParams.get("viewSpend");
   const router = useRouter();
 
-  const token = searchParams.get("token");
+  const token = getCookie('token');
+
+  const invitation_id = searchParams.get("invitation_id");
+
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [teamSpend, setTeamSpend] = useState<number | null>(null);
   const [userModels, setUserModels] = useState<string[]>([]);
@@ -247,11 +262,23 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
     }
   }, [selectedTeam]);
 
+
+  if (invitation_id != null) {
+    return (
+      <Onboarding></Onboarding>
+    )
+  }
+
   if (userID == null || token == null) {
-    // Now you can construct the full URL
+    // user is not logged in as yet 
     const url = proxyBaseUrl
       ? `${proxyBaseUrl}/sso/key/generate`
       : `/sso/key/generate`;
+    
+
+    // clear cookie called "token" since user will be logging in again
+    document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+
     console.log("Full URL:", url);
     window.location.href = url;
 

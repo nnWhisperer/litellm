@@ -1,13 +1,17 @@
-from pydantic import BaseModel, Extra, Field, model_validator, Json, ConfigDict
-from dataclasses import fields
 import enum
-from typing import Optional, List, Union, Dict, Literal, Any, TypedDict, TYPE_CHECKING
+import json
+import os
+import sys
+import uuid
+from dataclasses import fields
 from datetime import datetime
-import uuid, json, sys, os
-from litellm.types.router import UpdateRouterConfig
-from litellm.types.utils import ProviderField
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, TypedDict, Union
+
+from pydantic import BaseModel, ConfigDict, Extra, Field, Json, model_validator
 from typing_extensions import Annotated
 
+from litellm.types.router import UpdateRouterConfig
+from litellm.types.utils import ProviderField
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -171,10 +175,12 @@ class LiteLLMRoutes(enum.Enum):
         "/chat/completions",
         "/v1/chat/completions",
         # completions
+        "/engines/{model}/completions",
         "/openai/deployments/{model}/completions",
         "/completions",
         "/v1/completions",
         # embeddings
+        "/engines/{model}/embeddings",
         "/openai/deployments/{model}/embeddings",
         "/embeddings",
         "/v1/embeddings",
@@ -184,22 +190,46 @@ class LiteLLMRoutes(enum.Enum):
         # audio transcription
         "/audio/transcriptions",
         "/v1/audio/transcriptions",
+        # audio Speech
+        "/audio/speech",
+        "/v1/audio/speech",
         # moderations
         "/moderations",
         "/v1/moderations",
         # batches
         "/v1/batches",
         "/batches",
-        "/v1/batches{batch_id}",
-        "/batches{batch_id}",
+        "/v1/batches/{batch_id}",
+        "/batches/{batch_id}",
         # files
         "/v1/files",
         "/files",
+        "/v1/files/{file_id}",
+        "/files/{file_id}",
+        "/v1/files/{file_id}/content",
+        "/files/{file_id}/content",
+        # assistants-related routes
+        "/assistants",
+        "/v1/assistants",
+        "/v1/assistants/{assistant_id}",
+        "/assistants/{assistant_id}",
+        "/threads",
+        "/v1/threads",
+        "/threads/{thread_id}",
+        "/v1/threads/{thread_id}",
+        "/threads/{thread_id}/messages",
+        "/v1/threads/{thread_id}/messages",
+        "/threads/{thread_id}/runs",
+        "/v1/threads/{thread_id}/runs",
         # models
         "/models",
         "/v1/models",
         # token counter
         "/utils/token_counter",
+    ]
+
+    anthropic_routes: List = [
+        "/v1/messages",
     ]
 
     info_routes: List = [
@@ -211,6 +241,7 @@ class LiteLLMRoutes(enum.Enum):
         "/v2/model/info",
         "/v2/key/info",
         "/model_group/info",
+        "/health",
     ]
 
     # NOTE: ROUTES ONLY FOR MASTER KEY - only the Master Key should be able to Reset Spend
@@ -224,6 +255,7 @@ class LiteLLMRoutes(enum.Enum):
         "/key/delete",
         "/global/spend/logs",
         "/global/predict/spend/logs",
+        "/sso/get/logout_url",
     ]
 
     management_routes: List = [  # key
@@ -276,18 +308,23 @@ class LiteLLMRoutes(enum.Enum):
         "/routes",
         "/",
         "/health/liveliness",
+        "/health/liveness",
         "/health/readiness",
         "/test",
         "/config/yaml",
         "/metrics",
     ]
 
-    internal_user_routes: List = [
-        "/key/generate",
-        "/key/update",
-        "/key/delete",
-        "/key/info",
-    ] + spend_tracking_routes
+    internal_user_routes: List = (
+        [
+            "/key/generate",
+            "/key/update",
+            "/key/delete",
+            "/key/info",
+        ]
+        + spend_tracking_routes
+        + sso_only_routes
+    )
 
 
 # class LiteLLMAllowedRoutes(LiteLLMBase):
@@ -658,6 +695,10 @@ class UpdateUserRequest(GenerateRequestBase):
         return values
 
 
+class DeleteUserRequest(LiteLLMBase):
+    user_ids: List[str]  # required
+
+
 class NewCustomerRequest(LiteLLMBase):
     """
     Create a new customer, allocate a budget to them
@@ -843,6 +884,26 @@ class BlockTeamRequest(LiteLLMBase):
     team_id: str  # required
 
 
+class AddTeamCallback(LiteLLMBase):
+    callback_name: str
+    callback_type: Literal["success", "failure", "success_and_failure"]
+    # for now - only supported for langfuse
+    callback_vars: Dict[
+        Literal["langfuse_public_key", "langfuse_secret_key", "langfuse_host"], str
+    ]
+
+
+class TeamCallbackMetadata(LiteLLMBase):
+    success_callback: Optional[List[str]] = []
+    failure_callback: Optional[List[str]] = []
+    # for now - only supported for langfuse
+    callback_vars: Optional[
+        Dict[
+            Literal["langfuse_public_key", "langfuse_secret_key", "langfuse_host"], str
+        ]
+    ] = {}
+
+
 class LiteLLM_TeamTable(TeamBase):
     spend: Optional[float] = None
     max_parallel_requests: Optional[int] = None
@@ -872,6 +933,10 @@ class LiteLLM_TeamTable(TeamBase):
                     raise ValueError(f"Field {field} should be a valid dictionary")
 
         return values
+
+
+class LiteLLM_TeamTableCachedObj(LiteLLM_TeamTable):
+    last_refreshed_at: Optional[float] = None
 
 
 class TeamRequest(LiteLLMBase):
@@ -1082,6 +1147,14 @@ class ConfigGeneralSettings(LiteLLMBase):
     global_max_parallel_requests: Optional[int] = Field(
         None, description="global max parallel requests to allow for a proxy instance."
     )
+    max_request_size_mb: Optional[int] = Field(
+        None,
+        description="max request size in MB, if a request is larger than this size it will be rejected",
+    )
+    max_response_size_mb: Optional[int] = Field(
+        None,
+        description="max response size in MB, if a response is larger than this size it will be rejected",
+    )
     infer_model_from_keys: Optional[bool] = Field(
         None,
         description="for `/models` endpoint, infers available model based on environment keys (e.g. OPENAI_API_KEY)",
@@ -1194,12 +1267,16 @@ class LiteLLM_VerificationTokenView(LiteLLM_VerificationToken):
     soft_budget: Optional[float] = None
     team_model_aliases: Optional[Dict] = None
     team_member_spend: Optional[float] = None
+    team_metadata: Optional[Dict] = None
 
     # End User Params
     end_user_id: Optional[str] = None
     end_user_tpm_limit: Optional[int] = None
     end_user_rpm_limit: Optional[int] = None
     end_user_max_budget: Optional[float] = None
+
+    # Time stamps
+    last_refreshed_at: Optional[float] = None  # last time joint view was pulled from db
 
 
 class UserAPIKeyAuth(
@@ -1302,6 +1379,7 @@ class LiteLLM_SpendLogs(LiteLLMBase):
     cache_hit: Optional[str] = "False"
     cache_key: Optional[str] = None
     request_tags: Optional[Json] = None
+    requester_ip_address: Optional[str] = None
 
 
 class LiteLLM_ErrorLogs(LiteLLMBase):
@@ -1357,10 +1435,11 @@ class CallInfo(LiteLLMBase):
 
     spend: float
     max_budget: Optional[float] = None
-    token: str = Field(description="Hashed value of that key")
+    token: Optional[str] = Field(default=None, description="Hashed value of that key")
     customer_id: Optional[str] = None
     user_id: Optional[str] = None
     team_id: Optional[str] = None
+    team_alias: Optional[str] = None
     user_email: Optional[str] = None
     key_alias: Optional[str] = None
     projected_exceeded_date: Optional[str] = None
@@ -1489,6 +1568,10 @@ class SpendLogsMetadata(TypedDict):
     user_api_key_team_id: Optional[str]
     user_api_key_user_id: Optional[str]
     user_api_key_team_alias: Optional[str]
+    spend_logs_metadata: Optional[
+        dict
+    ]  # special param to log k,v pairs to spendlogs for a call
+    requester_ip_address: Optional[str]
 
 
 class SpendLogsPayload(TypedDict):
@@ -1513,3 +1596,126 @@ class SpendLogsPayload(TypedDict):
     request_tags: str  # json str
     team_id: Optional[str]
     end_user: Optional[str]
+    requester_ip_address: Optional[str]
+
+
+class SpanAttributes(str, enum.Enum):
+    # Note: We've taken this from opentelemetry-semantic-conventions-ai
+    # I chose to not add a new dependency to litellm for this
+
+    # Semantic Conventions for LLM requests, this needs to be removed after
+    # OpenTelemetry Semantic Conventions support Gen AI.
+    # Issue at https://github.com/open-telemetry/opentelemetry-python/issues/3868
+    # Refer to https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
+
+    LLM_SYSTEM = "gen_ai.system"
+    LLM_REQUEST_MODEL = "gen_ai.request.model"
+    LLM_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+    LLM_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+    LLM_REQUEST_TOP_P = "gen_ai.request.top_p"
+    LLM_PROMPTS = "gen_ai.prompt"
+    LLM_COMPLETIONS = "gen_ai.completion"
+    LLM_RESPONSE_MODEL = "gen_ai.response.model"
+    LLM_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+    LLM_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
+    LLM_TOKEN_TYPE = "gen_ai.token.type"
+    # To be added
+    # LLM_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reasons"
+    # LLM_RESPONSE_ID = "gen_ai.response.id"
+
+    # LLM
+    LLM_REQUEST_TYPE = "llm.request.type"
+    LLM_USAGE_TOTAL_TOKENS = "llm.usage.total_tokens"
+    LLM_USAGE_TOKEN_TYPE = "llm.usage.token_type"
+    LLM_USER = "llm.user"
+    LLM_HEADERS = "llm.headers"
+    LLM_TOP_K = "llm.top_k"
+    LLM_IS_STREAMING = "llm.is_streaming"
+    LLM_FREQUENCY_PENALTY = "llm.frequency_penalty"
+    LLM_PRESENCE_PENALTY = "llm.presence_penalty"
+    LLM_CHAT_STOP_SEQUENCES = "llm.chat.stop_sequences"
+    LLM_REQUEST_FUNCTIONS = "llm.request.functions"
+    LLM_REQUEST_REPETITION_PENALTY = "llm.request.repetition_penalty"
+    LLM_RESPONSE_FINISH_REASON = "llm.response.finish_reason"
+    LLM_RESPONSE_STOP_REASON = "llm.response.stop_reason"
+    LLM_CONTENT_COMPLETION_CHUNK = "llm.content.completion.chunk"
+
+    # OpenAI
+    LLM_OPENAI_RESPONSE_SYSTEM_FINGERPRINT = "gen_ai.openai.system_fingerprint"
+    LLM_OPENAI_API_BASE = "gen_ai.openai.api_base"
+    LLM_OPENAI_API_VERSION = "gen_ai.openai.api_version"
+    LLM_OPENAI_API_TYPE = "gen_ai.openai.api_type"
+
+
+class ManagementEndpointLoggingPayload(LiteLLMBase):
+    route: str
+    request_data: dict
+    response: Optional[dict] = None
+    exception: Optional[Any] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+
+
+class ProxyException(Exception):
+    # NOTE: DO NOT MODIFY THIS
+    # This is used to map exactly to OPENAI Exceptions
+    def __init__(
+        self,
+        message: str,
+        type: str,
+        param: Optional[str],
+        code: Optional[Union[int, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ):
+        self.message = message
+        self.type = type
+        self.param = param
+
+        # If we look on official python OpenAI lib, the code should be a string:
+        # https://github.com/openai/openai-python/blob/195c05a64d39c87b2dfdf1eca2d339597f1fce03/src/openai/types/shared/error_object.py#L11
+        # Related LiteLLM issue: https://github.com/BerriAI/litellm/discussions/4834
+        self.code = str(code)
+        if headers is not None:
+            for k, v in headers.items():
+                if not isinstance(v, str):
+                    headers[k] = str(v)
+        self.headers = headers or {}
+
+        # rules for proxyExceptions
+        # Litellm router.py returns "No healthy deployment available" when there are no deployments available
+        # Should map to 429 errors https://github.com/BerriAI/litellm/issues/2487
+        if (
+            "No healthy deployment available" in self.message
+            or "No deployments available" in self.message
+        ):
+            self.code = "429"
+
+    def to_dict(self) -> dict:
+        """Converts the ProxyException instance to a dictionary."""
+        return {
+            "message": self.message,
+            "type": self.type,
+            "param": self.param,
+            "code": self.code,
+        }
+
+
+class CommonProxyErrors(str, enum.Enum):
+    db_not_connected_error = "DB not connected"
+    no_llm_router = "No models configured on proxy"
+    not_allowed_access = "Admin-only endpoint. Not allowed to access this."
+    not_premium_user = "You must be a LiteLLM Enterprise user to use this feature. If you have a license please set `LITELLM_LICENSE` in your env. If you want to obtain a license meet with us here: https://calendly.com/d/4mp-gd3-k5k/litellm-1-1-onboarding-chat"
+
+
+class SpendCalculateRequest(LiteLLMBase):
+    model: Optional[str] = None
+    messages: Optional[List] = None
+    completion_response: Optional[dict] = None
+
+
+class ProxyErrorTypes(str, enum.Enum):
+    budget_exceeded = "budget_exceeded"
+    expired_key = "expired_key"
+    auth_error = "auth_error"
+    internal_server_error = "internal_server_error"
+    bad_request_error = "bad_request_error"

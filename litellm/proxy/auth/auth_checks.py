@@ -8,21 +8,27 @@ Run checks for:
 2. If user is in budget 
 3. If end_user ('user' passed to /chat/completions, /embeddings endpoint) is in budget 
 """
+import time
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal, Optional
+
+import litellm
+from litellm._logging import verbose_proxy_logger
+from litellm.caching import DualCache
 from litellm.proxy._types import (
-    LiteLLM_UserTable,
     LiteLLM_EndUserTable,
     LiteLLM_JWTAuth,
-    LiteLLM_TeamTable,
-    LiteLLMRoutes,
     LiteLLM_OrganizationTable,
+    LiteLLM_TeamTable,
+    LiteLLM_TeamTableCachedObj,
+    LiteLLM_UserTable,
+    LiteLLMRoutes,
     LitellmUserRoles,
+    UserAPIKeyAuth,
 )
-from typing import Optional, Literal, TYPE_CHECKING, Any
+from litellm.proxy.auth.auth_utils import is_llm_api_route
 from litellm.proxy.utils import PrismaClient, ProxyLogging, log_to_opentelemetry
-from litellm.caching import DualCache
-import litellm
 from litellm.types.services import ServiceLoggerPayload, ServiceTypes
-from datetime import datetime
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -53,9 +59,10 @@ def common_checks(
     4. If end_user (either via JWT or 'user' passed to /chat/completions, /embeddings endpoint) is in budget
     5. [OPTIONAL] If 'enforce_end_user' enabled - did developer pass in 'user' param for openai endpoints
     6. [OPTIONAL] If 'litellm.max_budget' is set (>0), is proxy under budget
+    7. [OPTIONAL] If guardrails modified - is request allowed to change this
     """
     _model = request_body.get("model", None)
-    if team_object is not None and team_object.blocked == True:
+    if team_object is not None and team_object.blocked is True:
         raise Exception(
             f"Team={team_object.team_id} is blocked. Update via `/team/unblock` if your admin."
         )
@@ -102,7 +109,7 @@ def common_checks(
         general_settings.get("enforce_user_param", None) is not None
         and general_settings["enforce_user_param"] == True
     ):
-        if route in LiteLLMRoutes.openai_routes.value and "user" not in request_body:
+        if is_llm_api_route(route=route) and "user" not in request_body:
             raise Exception(
                 f"'user' param not passed in. 'enforce_user_param'={general_settings['enforce_user_param']}"
             )
@@ -110,7 +117,7 @@ def common_checks(
         # Enterprise ONLY Feature
         # we already validate if user is premium_user when reading the config
         # Add an extra premium_usercheck here too, just incase
-        from litellm.proxy.proxy_server import premium_user, CommonProxyErrors
+        from litellm.proxy.proxy_server import CommonProxyErrors, premium_user
 
         if premium_user is not True:
             raise ValueError(
@@ -118,7 +125,7 @@ def common_checks(
                 + CommonProxyErrors.not_premium_user.value
             )
 
-        if route in LiteLLMRoutes.openai_routes.value:
+        if is_llm_api_route(route=route):
             # loop through each enforced param
             # example enforced_params ['user', 'metadata', 'metadata.generation_name']
             for enforced_param in general_settings["enforced_params"]:
@@ -146,13 +153,29 @@ def common_checks(
         and global_proxy_spend is not None
         # only run global budget checks for OpenAI routes
         # Reason - the Admin UI should continue working if the proxy crosses it's global budget
-        and route in LiteLLMRoutes.openai_routes.value
+        and is_llm_api_route(route=route)
         and route != "/v1/models"
         and route != "/models"
     ):
         if global_proxy_spend > litellm.max_budget:
-            raise Exception(
-                f"ExceededBudget: LiteLLM Proxy has exceeded its budget. Current spend: {global_proxy_spend}; Max Budget: {litellm.max_budget}"
+            raise litellm.BudgetExceededError(
+                current_cost=global_proxy_spend, max_budget=litellm.max_budget
+            )
+
+    _request_metadata: dict = request_body.get("metadata", {}) or {}
+    if _request_metadata.get("guardrails"):
+        # check if team allowed to modify guardrails
+        from litellm.proxy.guardrails.guardrail_helpers import can_modify_guardrails
+
+        can_modify: bool = can_modify_guardrails(team_object)
+        if can_modify is False:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Your team does not have permission to modify guardrails."
+                },
             )
     return True
 
@@ -345,6 +368,27 @@ async def get_user_object(
         )
 
 
+async def _cache_team_object(
+    team_id: str,
+    team_table: LiteLLM_TeamTableCachedObj,
+    user_api_key_cache: DualCache,
+    proxy_logging_obj: Optional[ProxyLogging],
+):
+    key = "team_id:{}".format(team_id)
+
+    ## CACHE REFRESH TIME!
+    team_table.last_refreshed_at = time.time()
+
+    value = team_table.model_dump_json(exclude_unset=True)
+    await user_api_key_cache.async_set_cache(key=key, value=value)
+
+    ## UPDATE REDIS CACHE ##
+    if proxy_logging_obj is not None:
+        await proxy_logging_obj.internal_usage_cache.async_set_cache(
+            key=key, value=value
+        )
+
+
 @log_to_opentelemetry
 async def get_team_object(
     team_id: str,
@@ -352,7 +396,8 @@ async def get_team_object(
     user_api_key_cache: DualCache,
     parent_otel_span: Optional[Span] = None,
     proxy_logging_obj: Optional[ProxyLogging] = None,
-) -> LiteLLM_TeamTable:
+    check_cache_only: Optional[bool] = None,
+) -> LiteLLM_TeamTableCachedObj:
     """
     - Check if team id in proxy Team Table
     - if valid, return LiteLLM_TeamTable object with defined limits
@@ -364,12 +409,35 @@ async def get_team_object(
         )
 
     # check if in cache
-    cached_team_obj = await user_api_key_cache.async_get_cache(key=team_id)
+    key = "team_id:{}".format(team_id)
+
+    cached_team_obj: Optional[LiteLLM_TeamTableCachedObj] = None
+
+    ## CHECK REDIS CACHE ##
+    if (
+        proxy_logging_obj is not None
+        and proxy_logging_obj.internal_usage_cache.redis_cache is not None
+    ):
+        cached_team_obj = (
+            await proxy_logging_obj.internal_usage_cache.redis_cache.async_get_cache(
+                key=key
+            )
+        )
+
+    if cached_team_obj is None:
+        cached_team_obj = await user_api_key_cache.async_get_cache(key=key)
+
     if cached_team_obj is not None:
         if isinstance(cached_team_obj, dict):
-            return LiteLLM_TeamTable(**cached_team_obj)
-        elif isinstance(cached_team_obj, LiteLLM_TeamTable):
+            return LiteLLM_TeamTableCachedObj(**cached_team_obj)
+        elif isinstance(cached_team_obj, LiteLLM_TeamTableCachedObj):
             return cached_team_obj
+
+    if check_cache_only:
+        raise Exception(
+            f"Team doesn't exist in cache + check_cache_only=True. Team={team_id}. Create team via `/team/new` call."
+        )
+
     # else, check db
     try:
         response = await prisma_client.db.litellm_teamtable.find_unique(
@@ -379,9 +447,14 @@ async def get_team_object(
         if response is None:
             raise Exception
 
-        _response = LiteLLM_TeamTable(**response.dict())
+        _response = LiteLLM_TeamTableCachedObj(**response.dict())
         # save the team object to cache
-        await user_api_key_cache.async_set_cache(key=response.team_id, value=_response)
+        await _cache_team_object(
+            team_id=team_id,
+            team_table=_response,
+            user_api_key_cache=user_api_key_cache,
+            proxy_logging_obj=proxy_logging_obj,
+        )
 
         return _response
     except Exception as e:
@@ -429,3 +502,61 @@ async def get_org_object(
         raise Exception(
             f"Organization doesn't exist in db. Organization={org_id}. Create organization via `/organization/new` call."
         )
+
+
+async def can_key_call_model(
+    model: str, llm_model_list: Optional[list], valid_token: UserAPIKeyAuth
+) -> Literal[True]:
+    """
+    Checks if token can call a given model
+
+    Returns:
+        - True: if token allowed to call model
+
+    Raises:
+        - Exception: If token not allowed to call model
+    """
+    if model in litellm.model_alias_map:
+        model = litellm.model_alias_map[model]
+
+    ## check if model in allowed model names
+    verbose_proxy_logger.debug(
+        f"LLM Model List pre access group check: {llm_model_list}"
+    )
+    from collections import defaultdict
+
+    access_groups = defaultdict(list)
+    if llm_model_list is not None:
+        for m in llm_model_list:
+            for group in m.get("model_info", {}).get("access_groups", []):
+                model_name = m["model_name"]
+                access_groups[group].append(model_name)
+
+    models_in_current_access_groups = []
+    if len(access_groups) > 0:  # check if token contains any model access groups
+        for idx, m in enumerate(
+            valid_token.models
+        ):  # loop token models, if any of them are an access group add the access group
+            if m in access_groups:
+                # if it is an access group we need to remove it from valid_token.models
+                models_in_group = access_groups[m]
+                models_in_current_access_groups.extend(models_in_group)
+
+    # Filter out models that are access_groups
+    filtered_models = [m for m in valid_token.models if m not in access_groups]
+
+    filtered_models += models_in_current_access_groups
+    verbose_proxy_logger.debug(f"model: {model}; allowed_models: {filtered_models}")
+    if (
+        model is not None
+        and model not in filtered_models
+        and "*" not in filtered_models
+    ):
+        raise ValueError(
+            f"API Key not allowed to access model. This token can only access models={valid_token.models}. Tried to access {model}"
+        )
+    valid_token.models = filtered_models
+    verbose_proxy_logger.debug(
+        f"filtered allowed_models: {filtered_models}; valid_token.models: {valid_token.models}"
+    )
+    return True

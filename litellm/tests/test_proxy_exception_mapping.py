@@ -1,25 +1,31 @@
 # test that the proxy actually does exception mapping to the OpenAI format
 
-import sys, os
-from unittest import mock
 import json
+import os
+import sys
+from unittest import mock
+
 from dotenv import load_dotenv
 
 load_dotenv()
-import os, io, asyncio
+import asyncio
+import io
+import os
 
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
+import openai
 import pytest
-import litellm, openai
-from fastapi.testclient import TestClient
 from fastapi import Response
-from litellm.proxy.proxy_server import (
+from fastapi.testclient import TestClient
+
+import litellm
+from litellm.proxy.proxy_server import (  # Replace with the actual module where your FastAPI router is defined
+    initialize,
     router,
     save_worker_config,
-    initialize,
-)  # Replace with the actual module where your FastAPI router is defined
+)
 
 invalid_authentication_error_response = Response(
     status_code=401,
@@ -66,6 +72,19 @@ def test_chat_completion_exception(client):
         json_response = response.json()
         print("keys in json response", json_response.keys())
         assert json_response.keys() == {"error"}
+        print("ERROR=", json_response["error"])
+        assert isinstance(json_response["error"]["message"], str)
+        assert (
+            "litellm.AuthenticationError: AuthenticationError: OpenAIException - Incorrect API key provided: bad-key. You can find your API key at https://platform.openai.com/account/api-keys."
+            in json_response["error"]["message"]
+        )
+
+        code_in_error = json_response["error"]["code"]
+        # OpenAI SDK required code to be STR, https://github.com/BerriAI/litellm/issues/4970
+        # If we look on official python OpenAI lib, the code should be a string:
+        # https://github.com/openai/openai-python/blob/195c05a64d39c87b2dfdf1eca2d339597f1fce03/src/openai/types/shared/error_object.py#L11
+        # Related LiteLLM issue: https://github.com/BerriAI/litellm/discussions/4834
+        assert type(code_in_error) == str
 
         # make an openai client to call _make_status_error_from_response
         openai_client = openai.OpenAI(api_key="anything")

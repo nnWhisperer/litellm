@@ -1,5 +1,6 @@
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
+import Image from '@theme/IdealImage';
 
 # 🐳 Docker, Deploying LiteLLM Proxy
 
@@ -16,8 +17,15 @@ git clone https://github.com/BerriAI/litellm
 # Go to folder
 cd litellm
 
-# Add the master key
+# Add the master key - you can change this after setup
 echo 'LITELLM_MASTER_KEY="sk-1234"' > .env
+
+# Add the litellm salt key - you cannot change this after adding a model
+# It is used to encrypt / decrypt your LLM API Key credentials
+# We recommned - https://1password.com/password-generator/ 
+# password generator to get a random hash for litellm salt key
+echo 'LITELLM_SALT_KEY="sk-1234"' > .env
+
 source .env
 
 # Start
@@ -26,7 +34,7 @@ docker-compose up
 
 <Tabs>
 
-<TabItem value="basic" label="Basic">
+<TabItem value="basic" label="Basic (No DB)">
 
 ### Step 1. CREATE config.yaml 
 
@@ -97,7 +105,13 @@ docker run ghcr.io/berriai/litellm:main-latest --port 8002 --num_workers 8
 ```
 
 </TabItem>
+<TabItem value="terraform" label="Terraform">
 
+s/o [Nicholas Cecere](https://www.linkedin.com/in/nicholas-cecere-24243549/) for his LiteLLM User Management Terraform
+
+👉 [Go here for Terraform](https://github.com/ncecere/terraform-litellm-user-mgmt)
+
+</TabItem>
 <TabItem value="base-image" label="use litellm as a base image">
 
 ```shell
@@ -240,6 +254,15 @@ Your OpenAI proxy server is now running on `http://127.0.0.1:4000`.
 
 **That's it ! That's the quick start to deploy litellm**
 
+## Use with Langchain, OpenAI SDK, LlamaIndex, Instructor, Curl
+
+:::info
+💡 Go here 👉 [to make your first LLM API Request](user_keys)
+
+LiteLLM is compatible with several SDKs - including OpenAI SDK, Anthropic SDK, Mistral SDK, LLamaIndex, Langchain (Js, Python)
+
+:::
+
 ## Options to deploy LiteLLM 
 
 | Docs | When to Use |
@@ -379,6 +402,7 @@ kubectl port-forward service/litellm-service 4000:4000
 Your OpenAI proxy server is now running on `http://0.0.0.0:4000`.
 
 </TabItem>
+
 <TabItem value="helm-deploy" label="Helm">
 
 
@@ -423,7 +447,6 @@ Your OpenAI proxy server is now running on `http://127.0.0.1:4000`.
 If you need to set your litellm proxy config.yaml, you can find this in [values.yaml](https://github.com/BerriAI/litellm/blob/main/deploy/charts/litellm-helm/values.yaml)
 
 </TabItem>
-
 
 <TabItem value="helm-oci" label="Helm OCI Registry (GHCR)">
 
@@ -535,9 +558,44 @@ docker run --name litellm-proxy \
 ghcr.io/berriai/litellm-database:main-latest --config your_config.yaml
 ```
 
+## LiteLLM without Internet Connection
+
+By default `prisma generate` downloads [prisma's engine binaries](https://www.prisma.io/docs/orm/reference/environment-variables-reference#custom-engine-file-locations). This might cause errors when running without internet connection. 
+
+Use this dockerfile to build an image which pre-generates the prisma binaries.
+
+```Dockerfile
+# Use the provided base image
+FROM ghcr.io/berriai/litellm:main-latest
+
+# Set the working directory to /app
+WORKDIR /app
+
+### [👇 KEY STEP] ###
+# Install Prisma CLI and generate Prisma client
+RUN pip install prisma 
+RUN prisma generate
+### FIN #### 
+
+
+# Expose the necessary port
+EXPOSE 4000
+
+# Override the CMD instruction with your desired command and arguments
+# WARNING: FOR PROD DO NOT USE `--detailed_debug` it slows down response times, instead use the following CMD
+# CMD ["--port", "4000", "--config", "config.yaml"]
+
+# Define the command to run your app
+ENTRYPOINT ["litellm"]
+
+CMD ["--port", "4000"]
+```
+
 ## Advanced Deployment Settings
 
-### Customization of the server root path
+### 1. Customization of the server root path (custom Proxy base url)
+
+💥 Use this when you want to serve LiteLLM on a custom base url path like `https://localhost:4000/api/v1` 
 
 :::info
 
@@ -548,9 +606,29 @@ In a Kubernetes deployment, it's possible to utilize a shared DNS to host multip
 Customize the root path to eliminate the need for employing multiple DNS configurations during deployment.
 
 👉 Set `SERVER_ROOT_PATH` in your .env and this will be set as your server root path
+```
+export SERVER_ROOT_PATH="/api/v1"
+```
 
+**Step 1. Run Proxy with `SERVER_ROOT_PATH` set in your env **
 
-### Setting SSL Certification 
+```shell
+docker run --name litellm-proxy \
+-e DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<dbname> \
+-e SERVER_ROOT_PATH="/api/v1" \
+-p 4000:4000 \
+ghcr.io/berriai/litellm-database:main-latest --config your_config.yaml
+```
+
+After running the proxy you can access it on `http://0.0.0.0:4000/api/v1/` (since we set `SERVER_ROOT_PATH="/api/v1"`)
+
+**Step 2. Verify Running on correct path**
+
+<Image img={require('../../img/custom_root_path.png')} />
+
+**That's it**, that's all you need to run the proxy on a custom root path
+
+### 2. Setting SSL Certification 
 
 Use this, If you need to set ssl certificates for your on prem litellm proxy
 
@@ -646,7 +724,7 @@ Once the stack is created, get the DatabaseURL of the Database resource, copy th
 #### 3. Connect to the EC2 Instance and deploy litellm on the EC2 container
 From the EC2 console, connect to the instance created by the stack (e.g., using SSH).
 
-Run the following command, replacing <database_url> with the value you copied in step 2
+Run the following command, replacing `<database_url>` with the value you copied in step 2
 
 ```shell
 docker run --name litellm-proxy \

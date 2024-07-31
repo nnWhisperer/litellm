@@ -1,3 +1,5 @@
+import Image from '@theme/IdealImage';
+
 # 🚨 Alerting / Webhooks
 
 Get alerts for:
@@ -15,6 +17,11 @@ Get alerts for:
 - **Spend** Weekly & Monthly spend per Team, Tag
 
 
+Works across: 
+- [Slack](#quick-start)
+- [Discord](#advanced---using-discord-webhooks)
+- [Microsoft Teams](#advanced---using-ms-teams-webhooks)
+
 ## Quick Start
 
 Set up a slack alert channel to receive alerts from proxy.
@@ -25,41 +32,33 @@ Get a slack webhook url from https://api.slack.com/messaging/webhooks
 
 You can also use Discord Webhooks, see [here](#using-discord-webhooks)
 
-### Step 2: Update config.yaml 
 
-- Set `SLACK_WEBHOOK_URL` in your proxy env to enable Slack alerts.
-- Just for testing purposes, let's save a bad key to our proxy.
+Set `SLACK_WEBHOOK_URL` in your proxy env to enable Slack alerts.
+
+```bash
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/<>/<>/<>"
+```
+
+### Step 2: Setup Proxy
 
 ```yaml
-model_list: 
-    model_name: "azure-model"
-    litellm_params:
-        model: "azure/gpt-35-turbo"
-        api_key: "my-bad-key" # 👈 bad key
-
 general_settings: 
     alerting: ["slack"]
     alerting_threshold: 300 # sends alerts if requests hang for 5min+ and responses take 5min+ 
-
-environment_variables:
-    SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/<>/<>/<>"
-    SLACK_DAILY_REPORT_FREQUENCY: "86400"  # 24 hours; Optional: defaults to 12 hours
 ```
 
-
-### Step 3: Start proxy
-
+Start proxy 
 ```bash
 $ litellm --config /path/to/config.yaml
 ```
 
-## Testing Alerting is Setup Correctly
 
-Make a GET request to `/health/services`, expect to see a test slack alert in your provided webhook slack channel
+### Step 3: Test it!
 
-```shell
-curl -X GET 'http://localhost:4000/health/services?service=slack' \
-  -H 'Authorization: Bearer sk-1234'
+
+```bash
+curl -X GET 'http://0.0.0.0:4000/health/services?service=slack' \
+-H 'Authorization: Bearer sk-1234'
 ```
 
 ## Advanced - Redacting Messages from Alerts
@@ -77,7 +76,34 @@ litellm_settings:
 ```
 
 
+## Advanced - Add Metadata to alerts 
 
+Add alerting metadata to proxy calls for debugging. 
+
+```python
+import openai
+client = openai.OpenAI(
+    api_key="anything",
+    base_url="http://0.0.0.0:4000"
+)
+
+# request sent to model set on litellm proxy, `litellm --model`
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages = [], 
+    extra_body={
+        "metadata": {
+            "alerting_metadata": {
+                "hello": "world"
+            }
+        }
+    }
+)
+```
+
+**Expected Response**
+
+<Image img={require('../../img/alerting_metadata.png')}/>
 
 ## Advanced - Opting into specific alert types
 
@@ -93,8 +119,8 @@ All Possible Alert Types
 
 ```python
 AlertType = Literal[
-    "llm_exceptions",
-    "llm_too_slow",
+    "llm_exceptions",        # LLM API Exceptions
+    "llm_too_slow",          # LLM Responses slower than alerting_threshold
     "llm_requests_hanging",
     "budget_alerts",
     "db_exceptions",
@@ -107,6 +133,103 @@ AlertType = Literal[
 
 ```
 
+## Advanced - set specific slack channels per alert type
+
+Use this if you want to set specific channels per alert type
+
+**This allows you to do the following**
+```
+llm_exceptions -> go to slack channel #llm-exceptions
+spend_reports -> go to slack channel #llm-spend-reports
+```
+
+Set `alert_to_webhook_url` on your config.yaml
+
+```yaml
+model_list:
+  - model_name: gpt-4
+    litellm_params:
+      model: openai/fake
+      api_key: fake-key
+      api_base: https://exampleopenaiendpoint-production.up.railway.app/
+
+general_settings: 
+  master_key: sk-1234
+  alerting: ["slack"]
+  alerting_threshold: 0.0001 # (Seconds) set an artifically low threshold for testing alerting
+  alert_to_webhook_url: {
+    "llm_exceptions": "https://hooks.slack.com/services/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",
+    "llm_too_slow": "https://hooks.slack.com/services/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",
+    "llm_requests_hanging": "https://hooks.slack.com/services/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",
+    "budget_alerts": "https://hooks.slack.com/services/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",
+    "db_exceptions": "https://hooks.slack.com/services/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",
+    "daily_reports": "https://hooks.slack.com/services/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",
+    "spend_reports": "https://hooks.slack.com/services/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",
+    "cooldown_deployment": "https://hooks.slack.com/services/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",
+    "new_model_added": "https://hooks.slack.com/services/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",
+    "outage_alerts": "https://hooks.slack.com/services/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",
+  }
+
+litellm_settings:
+  success_callback: ["langfuse"]
+```
+
+Test it - send a valid llm request - expect to see a `llm_too_slow` alert in it's own slack channel
+
+```shell
+curl -i http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-1234" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "Hello, Claude gm!"}
+    ]
+}'
+```
+
+
+## Advanced - Using MS Teams Webhooks
+
+MS Teams provides a slack compatible webhook url that you can use for alerting
+
+##### Quick Start
+
+1. [Get a webhook url](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook?tabs=newteams%2Cdotnet#create-an-incoming-webhook) for your Microsoft Teams channel 
+
+2. Add it to your .env
+
+```bash
+SLACK_WEBHOOK_URL="https://berriai.webhook.office.com/webhookb2/...6901/IncomingWebhook/b55fa0c2a48647be8e6effedcd540266/e04b1092-4a3e-44a2-ab6b-29a0a4854d1d"
+```
+
+3. Add it to your litellm config 
+
+```yaml
+model_list: 
+    model_name: "azure-model"
+    litellm_params:
+        model: "azure/gpt-35-turbo"
+        api_key: "my-bad-key" # 👈 bad key
+
+general_settings: 
+    alerting: ["slack"]
+    alerting_threshold: 300 # sends alerts if requests hang for 5min+ and responses take 5min+ 
+```
+
+4. Run health check!
+
+Call the proxy `/health/services` endpoint to test if your alerting connection is correctly setup.
+
+```bash
+curl --location 'http://0.0.0.0:4000/health/services?service=slack' \
+--header 'Authorization: Bearer sk-1234'
+```
+
+
+**Expected Response**
+
+<Image img={require('../../img/ms_teams_alerting.png')}/>
 
 ## Advanced - Using Discord Webhooks
 
@@ -139,7 +262,6 @@ environment_variables:
     SLACK_WEBHOOK_URL: "https://discord.com/api/webhooks/1240030362193760286/cTLWt5ATn1gKmcy_982rl5xmYHsrM1IWJdmCL1AyOmU9JdQXazrp8L1_PYgUtgxj8x4f/slack"
 ```
 
-That's it ! You're ready to go !
 
 ## Advanced - [BETA] Webhooks for Budget Alerts
 

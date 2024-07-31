@@ -32,12 +32,17 @@ import {
   allTagNamesCall,
   modelMetricsCall,
   modelAvailableCall,
-  modelInfoCall,
   adminspendByProvider,
   adminGlobalActivity,
   adminGlobalActivityPerModel,
 } from "./networking";
 import { start } from "repl";
+console.log("process.env.NODE_ENV", process.env.NODE_ENV);
+const isLocal = process.env.NODE_ENV === "development";
+const proxyBaseUrl = isLocal ? "http://localhost:4000" : null;
+if (isLocal !== true) {
+  console.log = function() {};
+}
 
 interface UsagePageProps {
   accessToken: string | null;
@@ -667,9 +672,7 @@ const UsagePage: React.FC<UsagePageProps> = ({
                   showLegend={true}
                   index="date"
                   categories={uniqueTeamIds}
-                  yAxisWidth={80}
-                  colors={["blue", "green", "yellow", "red", "purple"]}
-                  
+                  yAxisWidth={80}                  
                   stack={true}
                 />
               </Card>

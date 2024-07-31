@@ -1,21 +1,28 @@
 #### What this does ####
 #    On success, logs events to Langfuse
-import os
 import copy
+import os
 import traceback
+
 from packaging.version import Version
-from litellm._logging import verbose_logger
+
 import litellm
+from litellm._logging import verbose_logger
+from litellm.litellm_core_utils.redact_messages import redact_user_api_key_info
 
 
 class LangFuseLogger:
     # Class variables or attributes
     def __init__(
-        self, langfuse_public_key=None, langfuse_secret=None, flush_interval=1
+        self,
+        langfuse_public_key=None,
+        langfuse_secret=None,
+        langfuse_host=None,
+        flush_interval=1,
     ):
         try:
-            from langfuse import Langfuse
             import langfuse
+            from langfuse import Langfuse
         except Exception as e:
             raise Exception(
                 f"\033[91mLangfuse not installed, try running 'pip install langfuse' to fix this error: {e}\n{traceback.format_exc()}\033[0m"
@@ -23,7 +30,15 @@ class LangFuseLogger:
         # Instance variables
         self.secret_key = langfuse_secret or os.getenv("LANGFUSE_SECRET_KEY")
         self.public_key = langfuse_public_key or os.getenv("LANGFUSE_PUBLIC_KEY")
-        self.langfuse_host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+        self.langfuse_host = langfuse_host or os.getenv(
+            "LANGFUSE_HOST", "https://cloud.langfuse.com"
+        )
+        if not (
+            self.langfuse_host.startswith("http://")
+            or self.langfuse_host.startswith("https://")
+        ):
+            # add http:// if unset, assume communicating over private network - e.g. render
+            self.langfuse_host = "http://" + self.langfuse_host
         self.langfuse_release = os.getenv("LANGFUSE_RELEASE")
         self.langfuse_debug = os.getenv("LANGFUSE_DEBUG")
 
@@ -129,6 +144,10 @@ class LangFuseLogger:
                 f"Langfuse Logging - Enters logging function for model {kwargs}"
             )
 
+            # set default values for input/output for langfuse logging
+            input = None
+            output = None
+
             litellm_params = kwargs.get("litellm_params", {})
             litellm_call_id = kwargs.get("litellm_call_id", None)
             metadata = (
@@ -167,7 +186,7 @@ class LangFuseLogger:
                 or isinstance(response_obj, litellm.EmbeddingResponse)
             ):
                 input = prompt
-                output = response_obj["data"]
+                output = None
             elif response_obj is not None and isinstance(
                 response_obj, litellm.ModelResponse
             ):
@@ -183,6 +202,11 @@ class LangFuseLogger:
             ):
                 input = prompt
                 output = response_obj["data"]
+            elif response_obj is not None and isinstance(
+                response_obj, litellm.TranscriptionResponse
+            ):
+                input = prompt
+                output = response_obj["text"]
             print_verbose(f"OUTPUT IN LANGFUSE: {output}; original: {response_obj}")
             trace_id = None
             generation_id = None
@@ -251,7 +275,7 @@ class LangFuseLogger:
         input,
         response_obj,
     ):
-        from langfuse.model import CreateTrace, CreateGeneration
+        from langfuse.model import CreateGeneration, CreateTrace
 
         verbose_logger.warning(
             "Please upgrade langfuse to v2.0.0 or higher: https://github.com/langfuse/langfuse-python/releases/tag/v2.0.1"
@@ -367,6 +391,8 @@ class LangFuseLogger:
             debug = clean_metadata.pop("debug_langfuse", None)
             mask_input = clean_metadata.pop("mask_input", False)
             mask_output = clean_metadata.pop("mask_output", False)
+
+            clean_metadata = redact_user_api_key_info(metadata=clean_metadata)
 
             if trace_name is None and existing_trace_id is None:
                 # just log `litellm-{call_type}` as the trace name
@@ -528,31 +554,14 @@ class LangFuseLogger:
                 "version": clean_metadata.pop("version", None),
             }
 
+            parent_observation_id = metadata.get("parent_observation_id", None)
+            if parent_observation_id is not None:
+                generation_params["parent_observation_id"] = parent_observation_id
+
             if supports_prompt:
-                user_prompt = clean_metadata.pop("prompt", None)
-                if user_prompt is None:
-                    pass
-                elif isinstance(user_prompt, dict):
-                    from langfuse.model import (
-                        TextPromptClient,
-                        ChatPromptClient,
-                        Prompt_Text,
-                        Prompt_Chat,
-                    )
-
-                    if user_prompt.get("type", "") == "chat":
-                        _prompt_chat = Prompt_Chat(**user_prompt)
-                        generation_params["prompt"] = ChatPromptClient(
-                            prompt=_prompt_chat
-                        )
-                    elif user_prompt.get("type", "") == "text":
-                        _prompt_text = Prompt_Text(**user_prompt)
-                        generation_params["prompt"] = TextPromptClient(
-                            prompt=_prompt_text
-                        )
-                else:
-                    generation_params["prompt"] = user_prompt
-
+                generation_params = _add_prompt_to_generation_params(
+                    generation_params=generation_params, clean_metadata=clean_metadata
+                )
             if output is not None and isinstance(output, str) and level == "ERROR":
                 generation_params["status_message"] = output
 
@@ -565,5 +574,58 @@ class LangFuseLogger:
 
             return generation_client.trace_id, generation_id
         except Exception as e:
-            verbose_logger.debug(f"Langfuse Layer Error - {traceback.format_exc()}")
+            verbose_logger.error(f"Langfuse Layer Error - {traceback.format_exc()}")
             return None, None
+
+
+def _add_prompt_to_generation_params(
+    generation_params: dict, clean_metadata: dict
+) -> dict:
+    from langfuse.model import (
+        ChatPromptClient,
+        Prompt_Chat,
+        Prompt_Text,
+        TextPromptClient,
+    )
+
+    user_prompt = clean_metadata.pop("prompt", None)
+    if user_prompt is None:
+        pass
+    elif isinstance(user_prompt, dict):
+        if user_prompt.get("type", "") == "chat":
+            _prompt_chat = Prompt_Chat(**user_prompt)
+            generation_params["prompt"] = ChatPromptClient(prompt=_prompt_chat)
+        elif user_prompt.get("type", "") == "text":
+            _prompt_text = Prompt_Text(**user_prompt)
+            generation_params["prompt"] = TextPromptClient(prompt=_prompt_text)
+        elif "version" in user_prompt and "prompt" in user_prompt:
+            # prompts
+            if isinstance(user_prompt["prompt"], str):
+                _prompt_obj = Prompt_Text(
+                    name=user_prompt["name"],
+                    prompt=user_prompt["prompt"],
+                    version=user_prompt["version"],
+                    config=user_prompt.get("config", None),
+                )
+                generation_params["prompt"] = TextPromptClient(prompt=_prompt_obj)
+
+            elif isinstance(user_prompt["prompt"], list):
+                _prompt_obj = Prompt_Chat(
+                    name=user_prompt["name"],
+                    prompt=user_prompt["prompt"],
+                    version=user_prompt["version"],
+                    config=user_prompt.get("config", None),
+                )
+                generation_params["prompt"] = ChatPromptClient(prompt=_prompt_obj)
+            else:
+                verbose_logger.error(
+                    "[Non-blocking] Langfuse Logger: Invalid prompt format"
+                )
+        else:
+            verbose_logger.error(
+                "[Non-blocking] Langfuse Logger: Invalid prompt format. No prompt logged to Langfuse"
+            )
+    else:
+        generation_params["prompt"] = user_prompt
+
+    return generation_params

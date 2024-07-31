@@ -1,8 +1,10 @@
 import copy
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
 from fastapi import Request
-from typing import Any, Dict, Optional, TYPE_CHECKING
-from litellm.proxy._types import UserAPIKeyAuth
-from litellm._logging import verbose_proxy_logger, verbose_logger
+
+from litellm._logging import verbose_logger, verbose_proxy_logger
+from litellm.proxy._types import CommonProxyErrors, TeamCallbackMetadata, UserAPIKeyAuth
 from litellm.types.utils import SupportedCacheControls
 
 if TYPE_CHECKING:
@@ -27,6 +29,35 @@ def parse_cache_control(cache_control):
     return cache_dict
 
 
+def _get_metadata_variable_name(request: Request) -> str:
+    """
+    Helper to return what the "metadata" field should be called in the request data
+
+    For all /thread or /assistant endpoints we need to call this "litellm_metadata"
+
+    For ALL other endpoints we call this "metadata
+    """
+    if "thread" in request.url.path or "assistant" in request.url.path:
+        return "litellm_metadata"
+    if "batches" in request.url.path:
+        return "litellm_metadata"
+    if "/v1/messages" in request.url.path:
+        # anthropic API has a field called metadata
+        return "litellm_metadata"
+    else:
+        return "metadata"
+
+
+def safe_add_api_version_from_query_params(data: dict, request: Request):
+    try:
+        if hasattr(request, "query_params"):
+            query_params = dict(request.query_params)
+            if "api-version" in query_params:
+                data["api_version"] = query_params["api-version"]
+    except Exception as e:
+        verbose_logger.error("error checking api version in query params: %s", str(e))
+
+
 async def add_litellm_data_to_request(
     data: dict,
     request: Request,
@@ -49,9 +80,9 @@ async def add_litellm_data_to_request(
         dict: The modified data dictionary.
 
     """
-    query_params = dict(request.query_params)
-    if "api-version" in query_params:
-        data["api_version"] = query_params["api-version"]
+    from litellm.proxy.proxy_server import llm_router, premium_user
+
+    safe_add_api_version_from_query_params(data, request)
 
     # Include original request and headers in the data
     data["proxy_server_request"] = {
@@ -69,7 +100,36 @@ async def add_litellm_data_to_request(
         cache_dict = parse_cache_control(cache_control_header)
         data["ttl"] = cache_dict.get("s-maxage")
 
-    ### KEY-LEVEL CACHNG
+    verbose_proxy_logger.debug("receiving data: %s", data)
+
+    _metadata_variable_name = _get_metadata_variable_name(request)
+
+    if _metadata_variable_name not in data:
+        data[_metadata_variable_name] = {}
+    data[_metadata_variable_name]["user_api_key"] = user_api_key_dict.api_key
+    data[_metadata_variable_name]["user_api_key_alias"] = getattr(
+        user_api_key_dict, "key_alias", None
+    )
+    data[_metadata_variable_name]["user_api_end_user_max_budget"] = getattr(
+        user_api_key_dict, "end_user_max_budget", None
+    )
+    data[_metadata_variable_name]["litellm_api_version"] = version
+
+    if general_settings is not None:
+        data[_metadata_variable_name]["global_max_parallel_requests"] = (
+            general_settings.get("global_max_parallel_requests", None)
+        )
+
+    data[_metadata_variable_name]["user_api_key_user_id"] = user_api_key_dict.user_id
+    data[_metadata_variable_name]["user_api_key_org_id"] = user_api_key_dict.org_id
+    data[_metadata_variable_name]["user_api_key_team_id"] = getattr(
+        user_api_key_dict, "team_id", None
+    )
+    data[_metadata_variable_name]["user_api_key_team_alias"] = getattr(
+        user_api_key_dict, "team_alias", None
+    )
+
+    ### KEY-LEVEL Contorls
     key_metadata = user_api_key_dict.metadata
     if "cache" in key_metadata:
         data["cache"] = {}
@@ -78,49 +138,64 @@ async def add_litellm_data_to_request(
                 if k in SupportedCacheControls:
                     data["cache"][k] = v
 
-    verbose_proxy_logger.debug("receiving data: %s", data)
-    # users can pass in 'user' param to /chat/completions. Don't override it
-    if data.get("user", None) is None and user_api_key_dict.user_id is not None:
-        # if users are using user_api_key_auth, set `user` in `data`
-        data["user"] = user_api_key_dict.user_id
+    # Team spend, budget - used by prometheus.py
+    data[_metadata_variable_name][
+        "user_api_key_team_max_budget"
+    ] = user_api_key_dict.team_max_budget
+    data[_metadata_variable_name][
+        "user_api_key_team_spend"
+    ] = user_api_key_dict.team_spend
 
-    if "metadata" not in data:
-        data["metadata"] = {}
-    data["metadata"]["user_api_key"] = user_api_key_dict.api_key
-    data["metadata"]["user_api_key_alias"] = getattr(
-        user_api_key_dict, "key_alias", None
-    )
-    data["metadata"]["user_api_end_user_max_budget"] = getattr(
-        user_api_key_dict, "end_user_max_budget", None
-    )
-    data["metadata"]["litellm_api_version"] = version
+    # API Key spend, budget - used by prometheus.py
+    data[_metadata_variable_name]["user_api_key_spend"] = user_api_key_dict.spend
+    data[_metadata_variable_name][
+        "user_api_key_max_budget"
+    ] = user_api_key_dict.max_budget
 
-    if general_settings is not None:
-        data["metadata"]["global_max_parallel_requests"] = general_settings.get(
-            "global_max_parallel_requests", None
-        )
-
-    data["metadata"]["user_api_key_user_id"] = user_api_key_dict.user_id
-    data["metadata"]["user_api_key_org_id"] = user_api_key_dict.org_id
-    data["metadata"]["user_api_key_team_id"] = getattr(
-        user_api_key_dict, "team_id", None
-    )
-    data["metadata"]["user_api_key_team_alias"] = getattr(
-        user_api_key_dict, "team_alias", None
-    )
-    data["metadata"]["user_api_key_metadata"] = user_api_key_dict.metadata
+    data[_metadata_variable_name]["user_api_key_metadata"] = user_api_key_dict.metadata
     _headers = dict(request.headers)
     _headers.pop(
         "authorization", None
     )  # do not store the original `sk-..` api key in the db
-    data["metadata"]["headers"] = _headers
-    data["metadata"]["endpoint"] = str(request.url)
+    data[_metadata_variable_name]["headers"] = _headers
+    data[_metadata_variable_name]["endpoint"] = str(request.url)
+
+    # OTEL Controls / Tracing
     # Add the OTEL Parent Trace before sending it LiteLLM
-    data["metadata"]["litellm_parent_otel_span"] = user_api_key_dict.parent_otel_span
+    data[_metadata_variable_name][
+        "litellm_parent_otel_span"
+    ] = user_api_key_dict.parent_otel_span
+    _add_otel_traceparent_to_data(data, request=request)
 
     ### END-USER SPECIFIC PARAMS ###
     if user_api_key_dict.allowed_model_region is not None:
         data["allowed_model_region"] = user_api_key_dict.allowed_model_region
+
+    ## [Enterprise Only]
+    # Add User-IP Address
+    requester_ip_address = ""
+    if premium_user is True:
+        # Only set the IP Address for Enterprise Users
+        if (
+            request is not None
+            and hasattr(request, "client")
+            and hasattr(request.client, "host")
+            and request.client is not None
+        ):
+            requester_ip_address = request.client.host
+    data[_metadata_variable_name]["requester_ip_address"] = requester_ip_address
+
+    # Enterprise Only - Check if using tag based routing
+    if llm_router and llm_router.enable_tag_filtering is True:
+        if premium_user is not True:
+            verbose_proxy_logger.warning(
+                "router.enable_tag_filtering is on %s \n switched off router.enable_tag_filtering",
+                CommonProxyErrors.not_premium_user.value,
+            )
+            llm_router.enable_tag_filtering = False
+        else:
+            if "tags" in data:
+                data[_metadata_variable_name]["tags"] = data["tags"]
 
     ### TEAM-SPECIFIC PARAMS ###
     if user_api_key_dict.team_id is not None:
@@ -131,10 +206,57 @@ async def add_litellm_data_to_request(
             pass
         else:
             team_id = team_config.pop("team_id", None)
-            data["metadata"]["team_id"] = team_id
+            data[_metadata_variable_name]["team_id"] = team_id
             data = {
                 **team_config,
                 **data,
             }  # add the team-specific configs to the completion call
 
+    # Team Callbacks controls
+    if user_api_key_dict.team_metadata is not None:
+        team_metadata = user_api_key_dict.team_metadata
+        if "callback_settings" in team_metadata:
+            callback_settings = team_metadata.get("callback_settings", None) or {}
+            callback_settings_obj = TeamCallbackMetadata(**callback_settings)
+            verbose_proxy_logger.debug(
+                "Team callback settings activated: %s", callback_settings_obj
+            )
+            """
+            callback_settings = {
+              {
+                'callback_vars': {'langfuse_public_key': 'pk', 'langfuse_secret_key': 'sk_'}, 
+                'failure_callback': [], 
+                'success_callback': ['langfuse', 'langfuse']
+            }
+            }
+            """
+            data["success_callback"] = callback_settings_obj.success_callback
+            data["failure_callback"] = callback_settings_obj.failure_callback
+
+            if callback_settings_obj.callback_vars is not None:
+                # unpack callback_vars in data
+                for k, v in callback_settings_obj.callback_vars.items():
+                    data[k] = v
+
     return data
+
+
+def _add_otel_traceparent_to_data(data: dict, request: Request):
+    from litellm.proxy.proxy_server import open_telemetry_logger
+
+    if data is None:
+        return
+    if open_telemetry_logger is None:
+        # if user is not use OTEL don't send extra_headers
+        # relevant issue: https://github.com/BerriAI/litellm/issues/4448
+        return
+    if request.headers:
+        if "traceparent" in request.headers:
+            # we want to forward this to the LLM Provider
+            # Relevant issue: https://github.com/BerriAI/litellm/issues/4419
+            # pass this in extra_headers
+            if "extra_headers" not in data:
+                data["extra_headers"] = {}
+            _exra_headers = data["extra_headers"]
+            if "traceparent" not in _exra_headers:
+                _exra_headers["traceparent"] = request.headers["traceparent"]
